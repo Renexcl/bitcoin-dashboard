@@ -20,70 +20,82 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. Cargar Datos ---
-@st.cache_data(ttl=300)
+# --- 1. CACHÉ DE DATOS (Solo descarga cada 1 hora) ---
+@st.cache_data(ttl=3600) 
 def load_data():
-    # Descargamos datos desde 2019 para tener buen histórico
-    df = yf.download('BTC-USD', start='2019-01-01', end=date.today().strftime("%Y-%m-%d"))
+    # Descargamos datos. Reduje un poco el histórico (desde 2020) para acelerar la descarga inicial
+    df = yf.download('BTC-USD', start='2020-01-01', end=date.today().strftime("%Y-%m-%d"))
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df.reset_index(inplace=True)
+    
+    # Cálculos rápidos (Vectorizados)
+    df['RSI'] = ta.rsi(df['Close'], length=14)
+    df['SMA_200'] = ta.sma(df['Close'], length=200)
+    
+    # Lags para XGBoost
+    for i in range(1, 8):
+        df[f'Lag_{i}'] = df['Close'].shift(i)
+        
+    df.dropna(inplace=True)
     return df
 
-with st.spinner('Analizando mercados y entrenando modelos...'):
+# --- 2. CACHÉ DE MODELOS (La parte pesada se hace una sola vez) ---
+@st.cache_resource
+def run_models(df):
+    # --- A. PROPHET ---
+    df_prophet = df[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
+    df_prophet['ds'] = df_prophet['ds'].dt.tz_localize(None)
+    
+    m = Prophet(daily_seasonality=True)
+    m.fit(df_prophet)
+    future = m.make_future_dataframe(periods=30)
+    forecast = m.predict(future)
+    
+    # --- B. XGBOOST ---
+    features = [f'Lag_{i}' for i in range(1, 8)]
+    X = df[features]
+    y = df['Close']
+    
+    model_xgb = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=150, learning_rate=0.05)
+    model_xgb.fit(X, y)
+    
+    # Predicción Recursiva
+    future_xgb_prices = []
+    current_lags = df['Close'].tail(7).values.tolist()[::-1]
+    
+    for _ in range(30):
+        input_data = pd.DataFrame([current_lags], columns=features)
+        pred = model_xgb.predict(input_data)[0]
+        future_xgb_prices.append(pred)
+        current_lags.insert(0, pred)
+        current_lags.pop()
+        
+    return forecast, future_xgb_prices
+
+# --- EJECUCIÓN PRINCIPAL ---
+with st.spinner('Cargando datos del mercado...'):
     df = load_data()
 
-# --- 2. Ingeniería de Características ---
-df['RSI'] = ta.rsi(df['Close'], length=14)
-df['SMA_200'] = ta.sma(df['Close'], length=200)
+with st.spinner('Entrenando Inteligencia Artificial...'):
+    # Aquí está la magia: Si ya se ejecutó antes, recupera el resultado de la memoria instantáneamente
+    forecast_prophet, future_xgb_prices = run_models(df)
 
-# Lags para XGBoost (Ventana de 7 días)
-for i in range(1, 8):
-    df[f'Lag_{i}'] = df['Close'].shift(i)
-
-df.dropna(inplace=True)
-
-# --- 3. MODELO PROPHET (Tendencia) ---
-df_prophet = df[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
-df_prophet['ds'] = df_prophet['ds'].dt.tz_localize(None)
-m_prophet = Prophet(daily_seasonality=True)
-m_prophet.fit(df_prophet)
-future_prophet = m_prophet.make_future_dataframe(periods=30)
-forecast_prophet = m_prophet.predict(future_prophet)
-
-# --- 4. MODELO XGBOOST (Reactivo) ---
-features = [f'Lag_{i}' for i in range(1, 8)]
-X = df[features]
-y = df['Close']
-
-model_xgb = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=200, learning_rate=0.05)
-model_xgb.fit(X, y)
-
-# Predicción Recursiva (30 días)
-future_xgb_prices = []
-current_lags = df['Close'].tail(7).values.tolist()[::-1]
-
-for _ in range(30):
-    input_data = pd.DataFrame([current_lags], columns=features)
-    pred = model_xgb.predict(input_data)[0]
-    future_xgb_prices.append(pred)
-    current_lags.insert(0, pred)
-    current_lags.pop()
-
+# Variables de tiempo para gráficos
 last_date = df['Date'].iloc[-1]
 dates_future = [last_date + timedelta(days=i) for i in range(1, 31)]
 
-# --- INTERFAZ ---
+# --- INTERFAZ (RENDERIZADO) ---
 st.sidebar.title("⚙️ Configuración")
 tz_chile = pytz.timezone('America/Santiago')
 now_chile = datetime.now(tz_chile)
 st.sidebar.info(f"Actualizado: {now_chile.strftime('%d-%m-%Y %H:%M')}")
 st.sidebar.markdown("---")
-st.sidebar.write("Modelos Activos:")
-st.sidebar.caption("🟢 Prophet: Tendencia Base")
-st.sidebar.caption("🟠 XGBoost: Reactivo (ML)")
+st.sidebar.write("Modelos en Memoria:")
+st.sidebar.caption("🟢 Prophet: Listo")
+st.sidebar.caption("🟠 XGBoost: Listo")
 
-# Título y Autor
+# Título
 st.title('₿ Bitcoin Intelligence Dashboard')
 st.markdown("### By René Navarro Ourcilleón")
 st.markdown("---")
@@ -138,9 +150,8 @@ with col_cal2:
     except:
         val_xgb = 0
 
-    # --- AQUÍ ESTABA EL ERROR ANTERIORMENTE ---
     st.write(f"**Proyección para el {selected_date.strftime('%d-%m-%Y')}:**")
-    c1, c2 = st.columns(2)  # Esta es la línea que estaba cortada
+    c1, c2 = st.columns(2)
     c1.info(f"🤖 **Modelo Prophet:**\n# ${val_p:,.2f}")
     c2.warning(f"⚡ **Modelo XGBoost:**\n# ${val_xgb:,.2f}")
     
@@ -150,7 +161,8 @@ with col_cal2:
 st.markdown("---")
 with st.expander("Ver notas técnicas"):
     st.write("""
+    * **Optimización:** Los modelos ahora se cargan en caché para mayor velocidad.
     * **RSI:** Indicador de momentum. >70 es caro, <30 es barato.
     * **Prophet:** Modelo estadístico de Meta para tendencias estacionales.
-    * **XGBoost:** Modelo de Machine Learning entrenado con ventanas de 7 días.
+    * **XGBoost:** Modelo de Machine Learning reactivo.
     """)
