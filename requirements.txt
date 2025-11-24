@@ -4,3 +4,5 @@ pandas
 pandas_ta
 prophet
 plotly
+xgboost
+requests
