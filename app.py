@@ -4,134 +4,157 @@ import pandas as pd
 import pandas_ta as ta
 from prophet import Prophet
 import xgboost as xgb
-import requests
 from plotly import graph_objs as go
 from plotly.subplots import make_subplots
 from datetime import date, datetime, timedelta
 import pytz
 import numpy as np
 
-# --- Configuración ---
-st.set_page_config(layout="wide", page_title="Bitcoin AI Híbrido")
+# --- Configuración de la Página ---
+st.set_page_config(layout="wide", page_title="Bitcoin Dashboard Pro")
 
-# --- Funciones Auxiliares ---
+# --- Estilos CSS para ajustar el título ---
+st.markdown("""
+<style>
+.big-font { font-size:20px !important; color: #grey; }
+</style>
+""", unsafe_allow_html=True)
 
-@st.cache_data(ttl=300)
-def get_fear_greed_index():
-    """Obtiene el sentimiento del mercado desde API alternativa"""
-    try:
-        url = "https://api.alternative.me/fng/"
-        response = requests.get(url)
-        data = response.json()
-        return data['data'][0]
-    except:
-        return {"value": "50", "value_classification": "Neutral"}
-
+# --- 1. Cargar Datos y Funciones ---
 @st.cache_data(ttl=300)
 def load_data():
-    df = yf.download('BTC-USD', start='2018-01-01', end=date.today().strftime("%Y-%m-%d"))
+    df = yf.download('BTC-USD', start='2019-01-01', end=date.today().strftime("%Y-%m-%d"))
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df.reset_index(inplace=True)
     return df
 
-# --- Procesamiento ---
-with st.spinner('Inicializando motores de IA (Prophet + XGBoost)...'):
+with st.spinner('Cargando modelos y procesando datos...'):
     df = load_data()
-    fng = get_fear_greed_index()
 
-# Calculo Indicadores (Features para XGBoost)
-df['SMA_50'] = ta.sma(df['Close'], length=50)
-df['SMA_200'] = ta.sma(df['Close'], length=200)
+# --- 2. Ingeniería de Características (Calculadora de Indicadores) ---
+# RSI y Medias para el gráfico histórico
 df['RSI'] = ta.rsi(df['Close'], length=14)
-df['Volatility'] = df['Close'].rolling(20).std()
-df.dropna(inplace=True) # XGBoost no quiere valores nulos
+df['SMA_200'] = ta.sma(df['Close'], length=200)
 
-# --- MODELO 1: PROPHET (Tendencia) ---
+# PREPARACIÓN PARA XGBOOST (Lógica de Lags para evitar línea plana)
+# Creamos columnas con los precios de los 7 días anteriores
+for i in range(1, 8):
+    df[f'Lag_{i}'] = df['Close'].shift(i)
+
+df.dropna(inplace=True) # Eliminar filas vacías por los lags
+
+# --- 3. MODELO 1: PROPHET (Tendencia Estacional) ---
 df_prophet = df[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
 df_prophet['ds'] = df_prophet['ds'].dt.tz_localize(None)
 m_prophet = Prophet(daily_seasonality=True)
 m_prophet.fit(df_prophet)
-future_prophet = m_prophet.make_future_dataframe(periods=30) # 30 días
+future_prophet = m_prophet.make_future_dataframe(periods=30)
 forecast_prophet = m_prophet.predict(future_prophet)
 
-# --- MODELO 2: XGBOOST (Técnico/ML) ---
-# Preparamos datos para ML
-df_ml = df.copy()
-df_ml['Target'] = df_ml['Close'].shift(-1) # Predecir el cierre de mañana
-features = ['Close', 'SMA_50', 'SMA_200', 'RSI', 'Volatility']
-df_ml.dropna(inplace=True)
+# --- 4. MODELO 2: XGBOOST (Dinámico Recursivo) ---
+# Entrenamos para predecir el precio de "Hoy" usando los 7 días "Anteriores"
+features = [f'Lag_{i}' for i in range(1, 8)]
+X = df[features]
+y = df['Close']
 
-X = df_ml[features]
-y = df_ml['Target']
-
-# Entrenamos XGBoost (Regresor)
-model_xgb = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100)
+model_xgb = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=200, learning_rate=0.05)
 model_xgb.fit(X, y)
 
-# Predicción recursiva con XGBoost (Simulación 30 días)
+# Bucle de Predicción Futura (30 días)
 future_xgb_prices = []
-last_row = df_ml.iloc[-1][features].copy()
+# Tomamos los últimos 7 precios reales conocidos para empezar a predecir
+current_lags = df['Close'].tail(7).values.tolist()[::-1] # Invertimos para que coincida con Lag_1, Lag_2...
 
 for _ in range(30):
-    pred = model_xgb.predict(pd.DataFrame([last_row], columns=features))[0]
+    # Predecir el siguiente día
+    input_data = pd.DataFrame([current_lags], columns=features)
+    pred = model_xgb.predict(input_data)[0]
     future_xgb_prices.append(pred)
-    # Actualizamos features simulados para el siguiente paso (básico)
-    last_row['Close'] = pred
-    # Nota: Recalcular RSI/SMA real es complejo en loop, usamos aproximación estática para demo
     
-dates_future = forecast_prophet['ds'].tail(30).values
+    # Actualizar los lags: Quitamos el más viejo, agregamos la nueva predicción al inicio
+    current_lags.insert(0, pred)
+    current_lags.pop()
 
-# --- INTERFAZ ---
+# Crear dataframe de fechas futuras para XGBoost
+last_date = df['Date'].iloc[-1]
+dates_future = [last_date + timedelta(days=i) for i in range(1, 31)]
+
+# --- INTERFAZ GRÁFICA ---
 
 # Barra Lateral
-st.sidebar.title("🧠 Cerebro Digital")
-st.sidebar.info(f"**Sentimiento Actual:**\n\n# {fng['value']}\n{fng['value_classification']}")
+st.sidebar.title("⚙️ Configuración")
+tz_chile = pytz.timezone('America/Santiago')
+now_chile = datetime.now(tz_chile)
+st.sidebar.info(f"Actualizado: {now_chile.strftime('%d-%m-%Y %H:%M')}")
 st.sidebar.markdown("---")
 st.sidebar.write("Modelos Activos:")
-st.sidebar.success("✅ Prophet (Meta): Tendencias Estacionales")
-st.sidebar.success("✅ XGBoost: Patrones Técnicos")
+st.sidebar.caption("🟢 Prophet: Tendencia Base")
+st.sidebar.caption("🟠 XGBoost: Reactivo (ML)")
 
-# Título
-st.title('₿ Bitcoin: Modelo Híbrido de Predicción')
-st.markdown("Este panel combina **Estadística (Prophet)** con **Machine Learning (XGBoost)** y **Análisis de Sentimiento**.")
+# Encabezado Principal
+st.title('₿ Bitcoin Intelligence Dashboard')
+st.markdown("### By René Navarro Ourcilleón")
+st.markdown("---")
 
-# Métricas
-col1, col2, col3, col4 = st.columns(4)
+# Métricas Clave (KPIs)
 last_price = df['Close'].iloc[-1]
-col1.metric("Precio Actual", f"${last_price:,.0f}")
-col2.metric("Sentimiento Mercado", f"{fng['value_classification']}")
-col3.metric("RSI (14)", f"{df['RSI'].iloc[-1]:.1f}")
-col4.metric("Predicción XGBoost (Mañana)", f"${future_xgb_prices[0]:,.0f}")
+last_rsi = df['RSI'].iloc[-1]
+col1, col2, col3 = st.columns(3)
+col1.metric("Precio Actual", f"${last_price:,.2f}")
+col2.metric("RSI (Fuerza)", f"{last_rsi:.1f}", "Neutro" if 30 < last_rsi < 70 else ("Sobreventa 🟢" if last_rsi <= 30 else "Sobrecompra 🔴"))
+col3.metric("Predicción XGBoost (7 días)", f"${future_xgb_prices[6]:,.2f}", delta=f"{((future_xgb_prices[6]-last_price)/last_price)*100:.1f}%")
 
-# Gráfico Principal
-fig = go.Figure()
+# --- GRÁFICOS COMPUESTOS ---
+fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                    vertical_spacing=0.05, row_heights=[0.75, 0.25],
+                    subplot_titles=('Predicción Híbrida de Precio', 'Oscilador RSI'))
 
-# 1. Historia
-fig.add_trace(go.Scatter(x=df['Date'], y=df['Close'], name="Historia Real", line=dict(color='cyan', width=2)))
+# Gráfico 1: Precio + Modelos
+fig.add_trace(go.Scatter(x=df['Date'], y=df['Close'], name="Precio Histórico", line=dict(color='cyan', width=1.5)), row=1, col=1)
+fig.add_trace(go.Scatter(x=forecast_prophet['ds'], y=forecast_prophet['yhat'], name="Prophet (Tendencia)", line=dict(color='lime', dash='dot')), row=1, col=1)
+fig.add_trace(go.Scatter(x=dates_future, y=future_xgb_prices, name="XGBoost (Reactivo)", line=dict(color='orange', width=2)), row=1, col=1)
 
-# 2. Prophet
-fig.add_trace(go.Scatter(x=forecast_prophet['ds'], y=forecast_prophet['yhat'], name="Modelo Prophet (Tendencia)", line=dict(color='green', dash='dot')))
+# Gráfico 2: RSI
+fig.add_trace(go.Scatter(x=df['Date'], y=df['RSI'], name="RSI", line=dict(color='mediumpurple')), row=2, col=1)
+fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+fig.add_shape(type="rect", x0=df['Date'].iloc[0], x1=dates_future[-1], y0=30, y1=70, 
+              fillcolor="gray", opacity=0.1, layer="below", line_width=0, row=2, col=1)
 
-# 3. XGBoost
-fig.add_trace(go.Scatter(x=dates_future, y=future_xgb_prices, name="Modelo XGBoost (Técnico)", line=dict(color='orange', width=3)))
-
-fig.update_layout(title="Comparativa de Modelos: Tendencia vs Técnico", template="plotly_dark", height=600)
+fig.update_layout(template='plotly_dark', height=800, hovermode="x unified")
 st.plotly_chart(fig, use_container_width=True)
 
-# Explicación
-st.markdown("### 🤖 Análisis de Modelos")
-st.info("""
-**¿Por qué dos líneas de predicción?**
-* **Línea Verde (Prophet):** Es conservadora. Mira el calendario y la historia general.
-* **Línea Naranja (XGBoost):** Es agresiva. Mira el RSI, la volatilidad reciente y las medias móviles. Según tu investigación, este modelo suele tener mejor precisión a corto plazo (10-20% superior).
-""")
+# --- CALCULADORA DE FECHA (Restaurada y Mejorada) ---
+st.markdown("---")
+st.subheader("📅 Calculadora Predictiva")
 
-# Tabla comparativa
-st.subheader("📋 Proyección a 7 Días")
-proyeccion = pd.DataFrame({
-    'Fecha': pd.to_datetime(dates_future[:7]).strftime('%Y-%m-%d'),
-    'Prophet (Estable)': [f"${x:,.0f}" for x in forecast_prophet['yhat'].tail(30).values[:7]],
-    'XGBoost (Reactivo)': [f"${x:,.0f}" for x in future_xgb_prices[:7]]
-})
-st.table(proyeccion)
+col_cal1, col_cal2 = st.columns([1, 2])
+
+with col_cal1:
+    # Selector de fecha limitado a los 30 días de predicción
+    selected_date = st.date_input(
+        "Selecciona una fecha futura:",
+        min_value=dates_future[0].date(),
+        max_value=dates_future[-1].date(),
+        value=dates_future[7].date()
+    )
+
+with col_cal2:
+    # Buscar valores en ambos modelos
+    target_dt = pd.to_datetime(selected_date)
+    
+    # Valor Prophet
+    prophet_val = forecast_prophet.loc[forecast_prophet['ds'] == target_dt, 'yhat'].values
+    val_p = prophet_val[0] if len(prophet_val) > 0 else 0
+    
+    # Valor XGBoost
+    try:
+        idx = dates_future.index(pd.Timestamp(selected_date))
+        val_xgb = future_xgb_prices[idx]
+    except:
+        val_xgb = 0
+
+    # Mostrar Tarjetas
+    st.write(f"**Proyección para el {selected_date.strftime('%d-%m-%Y')}:**")
+    c1, c2 = st.
