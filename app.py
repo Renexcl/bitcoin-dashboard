@@ -1,4 +1,5 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 from prophet import Prophet
@@ -11,7 +12,7 @@ import numpy as np
 import requests
 
 # --- Configuración de la Página ---
-st.set_page_config(layout="wide", page_title="Bitcoin Dashboard Pro (Binance Data)")
+st.set_page_config(layout="wide", page_title="Bitcoin Dashboard Pro")
 
 # --- Estilos CSS ---
 st.markdown("""
@@ -21,66 +22,65 @@ a { text-decoration: none; color: #ff4b4b !important; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. FUNCIÓN DE CARGA DE DATOS (BINANCE API) ---
+# --- 1. FUNCIÓN DE CARGA DE DATOS (ROBUSTA) ---
 @st.cache_data(ttl=3600) 
 def load_data():
-    """
-    Descarga datos históricos de velas diarias (K-lines) directamente 
-    desde la API pública de Binance para el par BTC/USDT.
-    """
-    url = "https://api.binance.com/api/v3/klines"
-    symbol = "BTCUSDT"
-    interval = "1d"
-    
-    # Definimos fecha de inicio: 1 de Enero de 2020 (Timestamp en milisegundos)
-    start_date = datetime(2020, 1, 1)
-    start_ts = int(start_date.timestamp() * 1000)
-    end_ts = int(datetime.now().timestamp() * 1000)
-    
-    all_data = []
-    
-    # Bucle para paginación (Binance limita a 1000 datos por llamada)
-    while start_ts < end_ts:
-        params = {
-            'symbol': symbol,
-            'interval': interval,
-            'limit': 1000,
-            'startTime': start_ts
-        }
+    data_source = "Binance API"
+    df = pd.DataFrame()
+
+    # --- INTENTO 1: BINANCE ---
+    try:
+        url = "https://api.binance.com/api/v3/klines"
+        symbol = "BTCUSDT"
+        interval = "1d"
         
-        try:
-            response = requests.get(url, params=params)
+        # Solo últimos 4 años para evitar timeouts
+        start_date = datetime.now() - timedelta(days=1460)
+        start_ts = int(start_date.timestamp() * 1000)
+        end_ts = int(datetime.now().timestamp() * 1000)
+        
+        all_data = []
+        
+        # Límite de seguridad: 5 llamadas máximo para no bloquear
+        for _ in range(5):
+            if start_ts >= end_ts: break
+            
+            params = {'symbol': symbol, 'interval': interval, 'limit': 1000, 'startTime': start_ts}
+            response = requests.get(url, params=params, timeout=5)
+            
+            if response.status_code != 200: break
+            
             data = response.json()
+            if not data or isinstance(data, dict): break
             
-            # Si no hay más datos o hay error, paramos
-            if not data or isinstance(data, dict): 
-                break
-                
             all_data.extend(data)
-            
-            # Actualizamos el tiempo de inicio para la siguiente llamada
-            # El índice 6 es el 'Close Time' de la última vela
             start_ts = data[-1][6] + 1
-            
-        except Exception as e:
-            st.error(f"Error conectando con Binance: {e}")
-            break
-            
-    # Convertimos a DataFrame
-    # Columnas Binance: Open Time, Open, High, Low, Close, Volume, ...
-    df = pd.DataFrame(all_data, columns=[
-        'Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 
-        'Close Time', 'Quote Asset Volume', 'Number of Trades', 
-        'Taker Buy Base', 'Taker Buy Quote', 'Ignore'
-    ])
-    
-    # Procesamiento de tipos de datos
-    df['Date'] = pd.to_datetime(df['Open Time'], unit='ms')
-    df['Close'] = df['Close'].astype(float)
-    
-    # Limpieza final
-    df = df[['Date', 'Close']]
-    
+        
+        if len(all_data) > 100:
+            df = pd.DataFrame(all_data, columns=[
+                'Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 
+                'Close Time', 'Quote Asset Volume', 'Number of Trades', 
+                'Taker Buy Base', 'Taker Buy Quote', 'Ignore'
+            ])
+            df['Date'] = pd.to_datetime(df['Open Time'], unit='ms')
+            df['Close'] = df['Close'].astype(float)
+            df = df[['Date', 'Close']]
+    except Exception as e:
+        print(f"Binance falló: {e}")
+
+    # --- INTENTO 2: YAHOO FINANCE (RESPALDO) ---
+    # Si Binance falló o trajo tabla vacía, usamos Yahoo
+    if df.empty or len(df) < 10:
+        data_source = "Yahoo Finance (Backup)"
+        df = yf.download('BTC-USD', start='2020-01-01', end=date.today().strftime("%Y-%m-%d"))
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.reset_index(inplace=True)
+        # Aseguramos nombres de columnas estándar
+        if 'Date' not in df.columns and 'index' in df.columns:
+            df.rename(columns={'index': 'Date'}, inplace=True)
+
+    # --- PROCESAMIENTO COMÚN ---
     # Cálculos Técnicos
     df['RSI'] = ta.rsi(df['Close'], length=14)
     df['SMA_200'] = ta.sma(df['Close'], length=200)
@@ -92,9 +92,9 @@ def load_data():
     df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
     
-    return df
+    return df, data_source
 
-# --- 2. CACHÉ DE MODELOS (Entrenamiento) ---
+# --- 2. CACHÉ DE MODELOS ---
 @st.cache_resource
 def run_models(df):
     # A. PROPHET
@@ -128,8 +128,14 @@ def run_models(df):
     return forecast, future_xgb_prices
 
 # --- EJECUCIÓN PRINCIPAL ---
-with st.spinner('Conectando con Binance API y procesando datos...'):
-    df = load_data()
+with st.spinner('Conectando con Mercados Globales...'):
+    df, source_name = load_data()
+    
+    # Validación final de seguridad
+    if df.empty:
+        st.error("Error crítico: No se pudieron descargar datos de ninguna fuente.")
+        st.stop()
+        
     forecast_prophet, future_xgb_prices = run_models(df)
 
 last_date = df['Date'].iloc[-1]
@@ -142,7 +148,11 @@ now_chile = datetime.now(tz_chile)
 st.sidebar.info(f"Actualizado: {now_chile.strftime('%d-%m-%Y %H:%M')}")
 st.sidebar.markdown("---")
 st.sidebar.write("Fuente de Datos:")
-st.sidebar.success("🟡 **Binance Spot (BTC/USDT)**")
+if "Binance" in source_name:
+    st.sidebar.success(f"🟡 **{source_name}**")
+else:
+    st.sidebar.warning(f"🔵 **{source_name}**")
+    
 st.sidebar.markdown("---")
 st.sidebar.caption("Modelos Activos:")
 st.sidebar.caption("🟢 Prophet: Activo")
@@ -158,14 +168,14 @@ last_price = df['Close'].iloc[-1]
 last_rsi = df['RSI'].iloc[-1]
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Precio Actual (Binance)", f"${last_price:,.2f}")
+col1.metric("Precio Actual", f"${last_price:,.2f}")
 col2.metric("RSI (Fuerza)", f"{last_rsi:.1f}", "Neutro" if 30 < last_rsi < 70 else ("Sobreventa 🟢" if last_rsi <= 30 else "Sobrecompra 🔴"))
 col3.metric("Predicción XGBoost (7 días)", f"${future_xgb_prices[6]:,.2f}", delta=f"{((future_xgb_prices[6]-last_price)/last_price)*100:.1f}%")
 
 # Gráficos
 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                     vertical_spacing=0.05, row_heights=[0.75, 0.25],
-                    subplot_titles=('Predicción Híbrida (Data: Binance)', 'RSI'))
+                    subplot_titles=('Predicción Híbrida', 'RSI'))
 
 fig.add_trace(go.Scatter(x=df['Date'], y=df['Close'], name="Precio Histórico", line=dict(color='cyan', width=1.5)), row=1, col=1)
 fig.add_trace(go.Scatter(x=forecast_prophet['ds'], y=forecast_prophet['yhat'], name="Prophet (Tendencia)", line=dict(color='lime', dash='dot')), row=1, col=1)
@@ -210,7 +220,10 @@ with col_cal2:
 # Biblioteca Técnica
 st.markdown("---")
 st.header("📚 Documentación y Metodología")
-st.markdown("Datos extraídos oficialmente de **Binance API** (Par BTC/USDT).")
+if "Yahoo" in source_name:
+    st.info("ℹ️ Nota: Binance API no respondió desde este servidor (posible bloqueo regional). Se utilizaron datos de Yahoo Finance automáticamente.")
+else:
+    st.success("✅ Conexión exitosa con Binance API.")
 
 with st.expander("🟢 Modelo 1: Facebook Prophet (Ver Detalles)"):
     st.markdown("""
@@ -224,12 +237,6 @@ with st.expander("🟠 Modelo 2: XGBoost (Ver Detalles)"):
     st.markdown("""
     **¿Qué es?** "Extreme Gradient Boosting". Algoritmo líder en Machine Learning competitivo.
     * **Enfoque:** Árboles de decisión secuenciales que corrigen errores previos.
-    * **Uso en este panel:** Reactivo a los últimos 7 días de precio en Binance.
+    * **Uso en este panel:** Reactivo a los últimos 7 días de precio.
     🔗 [XGBoost Docs](https://xgboost.readthedocs.io/)
-    """)
-
-with st.expander("🟣 Indicador: RSI (Ver Detalles)"):
-    st.markdown("""
-    **¿Qué es?** Índice de Fuerza Relativa.
-    * **Interpretación:** >70 (Sobrecompra/Caro), <30 (Sobreventa/Barato).
     """)
