@@ -17,19 +17,20 @@ st.set_page_config(layout="wide", page_title="Bitcoin Dashboard Pro")
 st.markdown("""
 <style>
 .big-font { font-size:20px !important; color: #grey; }
+a { text-decoration: none; color: #ff4b4b !important; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. CACHÉ DE DATOS (Solo descarga cada 1 hora) ---
+# --- 1. CACHÉ DE DATOS (1 hora) ---
 @st.cache_data(ttl=3600) 
 def load_data():
-    # Descargamos datos. Reduje un poco el histórico (desde 2020) para acelerar la descarga inicial
+    # Descarga optimizada
     df = yf.download('BTC-USD', start='2020-01-01', end=date.today().strftime("%Y-%m-%d"))
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df.reset_index(inplace=True)
     
-    # Cálculos rápidos (Vectorizados)
+    # Cálculos
     df['RSI'] = ta.rsi(df['Close'], length=14)
     df['SMA_200'] = ta.sma(df['Close'], length=200)
     
@@ -40,10 +41,10 @@ def load_data():
     df.dropna(inplace=True)
     return df
 
-# --- 2. CACHÉ DE MODELOS (La parte pesada se hace una sola vez) ---
+# --- 2. CACHÉ DE MODELOS (Entrenamiento único) ---
 @st.cache_resource
 def run_models(df):
-    # --- A. PROPHET ---
+    # A. PROPHET
     df_prophet = df[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
     df_prophet['ds'] = df_prophet['ds'].dt.tz_localize(None)
     
@@ -52,7 +53,7 @@ def run_models(df):
     future = m.make_future_dataframe(periods=30)
     forecast = m.predict(future)
     
-    # --- B. XGBOOST ---
+    # B. XGBOOST
     features = [f'Lag_{i}' for i in range(1, 8)]
     X = df[features]
     y = df['Close']
@@ -73,27 +74,23 @@ def run_models(df):
         
     return forecast, future_xgb_prices
 
-# --- EJECUCIÓN PRINCIPAL ---
-with st.spinner('Cargando datos del mercado...'):
+# --- EJECUCIÓN ---
+with st.spinner('Conectando con Yahoo Finance y procesando algoritmos...'):
     df = load_data()
-
-with st.spinner('Entrenando Inteligencia Artificial...'):
-    # Aquí está la magia: Si ya se ejecutó antes, recupera el resultado de la memoria instantáneamente
     forecast_prophet, future_xgb_prices = run_models(df)
 
-# Variables de tiempo para gráficos
 last_date = df['Date'].iloc[-1]
 dates_future = [last_date + timedelta(days=i) for i in range(1, 31)]
 
-# --- INTERFAZ (RENDERIZADO) ---
+# --- INTERFAZ ---
 st.sidebar.title("⚙️ Configuración")
 tz_chile = pytz.timezone('America/Santiago')
 now_chile = datetime.now(tz_chile)
 st.sidebar.info(f"Actualizado: {now_chile.strftime('%d-%m-%Y %H:%M')}")
 st.sidebar.markdown("---")
-st.sidebar.write("Modelos en Memoria:")
-st.sidebar.caption("🟢 Prophet: Listo")
-st.sidebar.caption("🟠 XGBoost: Listo")
+st.sidebar.write("Estado del Sistema:")
+st.sidebar.caption("🟢 Prophet: Activo")
+st.sidebar.caption("🟠 XGBoost: Activo")
 
 # Título
 st.title('₿ Bitcoin Intelligence Dashboard')
@@ -139,11 +136,9 @@ with col_cal1:
 
 with col_cal2:
     target_dt = pd.to_datetime(selected_date)
-    # Prophet
     prophet_val = forecast_prophet.loc[forecast_prophet['ds'] == target_dt, 'yhat'].values
     val_p = prophet_val[0] if len(prophet_val) > 0 else 0
     
-    # XGBoost
     try:
         idx = dates_future.index(pd.Timestamp(selected_date))
         val_xgb = future_xgb_prices[idx]
@@ -152,17 +147,42 @@ with col_cal2:
 
     st.write(f"**Proyección para el {selected_date.strftime('%d-%m-%Y')}:**")
     c1, c2 = st.columns(2)
-    c1.info(f"🤖 **Modelo Prophet:**\n# ${val_p:,.2f}")
-    c2.warning(f"⚡ **Modelo XGBoost:**\n# ${val_xgb:,.2f}")
-    
-    diff = val_xgb - val_p
-    st.caption(f"Diferencia entre modelos: ${diff:,.2f}")
+    c1.info(f"🤖 **Prophet (Meta):**\n# ${val_p:,.2f}")
+    c2.warning(f"⚡ **XGBoost (ML):**\n# ${val_xgb:,.2f}")
+    st.caption(f"Diferencia: ${val_xgb - val_p:,.2f}")
 
+# --- NUEVA SECCIÓN: BIBLIOTECA TÉCNICA ---
 st.markdown("---")
-with st.expander("Ver notas técnicas"):
-    st.write("""
-    * **Optimización:** Los modelos ahora se cargan en caché para mayor velocidad.
-    * **RSI:** Indicador de momentum. >70 es caro, <30 es barato.
-    * **Prophet:** Modelo estadístico de Meta para tendencias estacionales.
-    * **XGBoost:** Modelo de Machine Learning reactivo.
+st.header("📚 Documentación y Metodología")
+st.markdown("Accede a la documentación oficial de los modelos utilizados para entender su funcionamiento matemático.")
+
+with st.expander("🟢 Modelo 1: Facebook Prophet (Ver Detalles)"):
+    st.markdown("""
+    **¿Qué es?** Un algoritmo diseñado por el equipo de Core Data Science de Meta.
+    * **Enfoque:** Descompone el precio en tendencias (anuales, semanales) y feriados.
+    * **Uso en este panel:** Define la "trayectoria base" o inercia del mercado.
+    
+    🔗 **Recursos Oficiales:**
+    * [Documentación Técnica (Prophet Docs)](https://facebook.github.io/prophet/)
+    * [Paper Académico: "Forecasting at Scale"](https://peerj.com/preprints/3190.pdf)
+    """)
+
+with st.expander("🟠 Modelo 2: XGBoost (Ver Detalles)"):
+    st.markdown("""
+    **¿Qué es?** "Extreme Gradient Boosting". Es el algoritmo dominador en competiciones de Kaggle.
+    * **Enfoque:** Crea cientos de "árboles de decisión" que corrigen los errores de los árboles anteriores. 
+    * **Uso en este panel:** Aprende de los últimos 7 días para predecir cambios bruscos a corto plazo.
+    
+    🔗 **Recursos Oficiales:**
+    * [Documentación Oficial XGBoost](https://xgboost.readthedocs.io/en/stable/)
+    * [Paper Original (KDD 2016)](https://arxiv.org/pdf/1603.02754.pdf)
+    """)
+
+with st.expander("🟣 Indicador: RSI (Ver Detalles)"):
+    st.markdown("""
+    **¿Qué es?** El Índice de Fuerza Relativa mide la velocidad y magnitud de los movimientos de precios.
+    * **Interpretación:** Ayuda a identificar condiciones de sobrecompra o sobreventa.
+    
+    🔗 **Recursos:**
+    * [Definición en Investopedia](https://www.investopedia.com/terms/r/rsi.asp)
     """)
