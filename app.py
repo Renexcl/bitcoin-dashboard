@@ -3,32 +3,30 @@ import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 from prophet import Prophet
+import xgboost as xgb
+import requests
 from plotly import graph_objs as go
 from plotly.subplots import make_subplots
 from datetime import date, datetime, timedelta
 import pytz
+import numpy as np
 
-# --- Configuración de la Página ---
-st.set_page_config(layout="wide", page_title="Monitor Bitcoin IA")
+# --- Configuración ---
+st.set_page_config(layout="wide", page_title="Bitcoin AI Híbrido")
 
-# --- Barra Lateral ---
-st.sidebar.title("⚙️ Panel de Control")
-st.sidebar.markdown("---")
+# --- Funciones Auxiliares ---
 
-# Hora Chile
-now_utc = datetime.now(pytz.utc)
-tz_chile = pytz.timezone('America/Santiago')
-now_chile = now_utc.astimezone(tz_chile)
+@st.cache_data(ttl=300)
+def get_fear_greed_index():
+    """Obtiene el sentimiento del mercado desde API alternativa"""
+    try:
+        url = "https://api.alternative.me/fng/"
+        response = requests.get(url)
+        data = response.json()
+        return data['data'][0]
+    except:
+        return {"value": "50", "value_classification": "Neutral"}
 
-st.sidebar.info(f"📅 **Última Actualización:**\n\n{now_chile.strftime('%d-%m-%Y')}\n⏱️ {now_chile.strftime('%H:%M:%S')} (Chile)")
-st.sidebar.markdown("---")
-st.sidebar.write("Datos de Yahoo Finance en tiempo real.")
-
-# --- Título ---
-st.title('₿ Monitor Estratégico de Bitcoin By René Navarro Ourcilleón')
-st.markdown(f"> *Análisis técnico automatizado e Inteligencia Artificial aplicada.*")
-
-# --- Cargar Datos ---
 @st.cache_data(ttl=300)
 def load_data():
     df = yf.download('BTC-USD', start='2018-01-01', end=date.today().strftime("%Y-%m-%d"))
@@ -37,91 +35,103 @@ def load_data():
     df.reset_index(inplace=True)
     return df
 
-with st.spinner('Procesando datos del mercado...'):
+# --- Procesamiento ---
+with st.spinner('Inicializando motores de IA (Prophet + XGBoost)...'):
     df = load_data()
+    fng = get_fear_greed_index()
 
-# --- Cálculos ---
-df['SMA_200'] = ta.sma(df['Close'], length=200) # Tendencia Largo Plazo
-df['RSI'] = ta.rsi(df['Close'], length=14)      # Fuerza
+# Calculo Indicadores (Features para XGBoost)
+df['SMA_50'] = ta.sma(df['Close'], length=50)
+df['SMA_200'] = ta.sma(df['Close'], length=200)
+df['RSI'] = ta.rsi(df['Close'], length=14)
+df['Volatility'] = df['Close'].rolling(20).std()
+df.dropna(inplace=True) # XGBoost no quiere valores nulos
 
+# --- MODELO 1: PROPHET (Tendencia) ---
+df_prophet = df[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
+df_prophet['ds'] = df_prophet['ds'].dt.tz_localize(None)
+m_prophet = Prophet(daily_seasonality=True)
+m_prophet.fit(df_prophet)
+future_prophet = m_prophet.make_future_dataframe(periods=30) # 30 días
+forecast_prophet = m_prophet.predict(future_prophet)
+
+# --- MODELO 2: XGBOOST (Técnico/ML) ---
+# Preparamos datos para ML
+df_ml = df.copy()
+df_ml['Target'] = df_ml['Close'].shift(-1) # Predecir el cierre de mañana
+features = ['Close', 'SMA_50', 'SMA_200', 'RSI', 'Volatility']
+df_ml.dropna(inplace=True)
+
+X = df_ml[features]
+y = df_ml['Target']
+
+# Entrenamos XGBoost (Regresor)
+model_xgb = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100)
+model_xgb.fit(X, y)
+
+# Predicción recursiva con XGBoost (Simulación 30 días)
+future_xgb_prices = []
+last_row = df_ml.iloc[-1][features].copy()
+
+for _ in range(30):
+    pred = model_xgb.predict(pd.DataFrame([last_row], columns=features))[0]
+    future_xgb_prices.append(pred)
+    # Actualizamos features simulados para el siguiente paso (básico)
+    last_row['Close'] = pred
+    # Nota: Recalcular RSI/SMA real es complejo en loop, usamos aproximación estática para demo
+    
+dates_future = forecast_prophet['ds'].tail(30).values
+
+# --- INTERFAZ ---
+
+# Barra Lateral
+st.sidebar.title("🧠 Cerebro Digital")
+st.sidebar.info(f"**Sentimiento Actual:**\n\n# {fng['value']}\n{fng['value_classification']}")
+st.sidebar.markdown("---")
+st.sidebar.write("Modelos Activos:")
+st.sidebar.success("✅ Prophet (Meta): Tendencias Estacionales")
+st.sidebar.success("✅ XGBoost: Patrones Técnicos")
+
+# Título
+st.title('₿ Bitcoin: Modelo Híbrido de Predicción')
+st.markdown("Este panel combina **Estadística (Prophet)** con **Machine Learning (XGBoost)** y **Análisis de Sentimiento**.")
+
+# Métricas
+col1, col2, col3, col4 = st.columns(4)
 last_price = df['Close'].iloc[-1]
-last_rsi = df['RSI'].iloc[-1]
-last_sma200 = df['SMA_200'].iloc[-1]
+col1.metric("Precio Actual", f"${last_price:,.0f}")
+col2.metric("Sentimiento Mercado", f"{fng['value_classification']}")
+col3.metric("RSI (14)", f"{df['RSI'].iloc[-1]:.1f}")
+col4.metric("Predicción XGBoost (Mañana)", f"${future_xgb_prices[0]:,.0f}")
 
-# --- KPIs ---
-st.markdown("### 📊 Estado del Mercado")
-col1, col2, col3 = st.columns(3)
-col1.metric("Precio Actual", f"${last_price:,.2f}")
-trend = "ALCISTA (Bullish) 🟢" if last_price > last_sma200 else "BAJISTA (Bearish) 🔴"
-col2.metric("Tendencia (SMA 200)", trend)
-rsi_st = "SOBRECOMPRA 🔴" if last_rsi > 70 else "SOBREVENTA 🟢" if last_rsi < 30 else "NEUTRAL ⚪"
-col3.metric("RSI (Fuerza)", f"{last_rsi:.1f}", rsi_st)
+# Gráfico Principal
+fig = go.Figure()
 
-# --- IA Prophet ---
-df_train = df[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
-df_train['ds'] = df_train['ds'].dt.tz_localize(None)
+# 1. Historia
+fig.add_trace(go.Scatter(x=df['Date'], y=df['Close'], name="Historia Real", line=dict(color='cyan', width=2)))
 
-m = Prophet(daily_seasonality=True)
-m.fit(df_train)
-future = m.make_future_dataframe(periods=90)
-forecast = m.predict(future)
+# 2. Prophet
+fig.add_trace(go.Scatter(x=forecast_prophet['ds'], y=forecast_prophet['yhat'], name="Modelo Prophet (Tendencia)", line=dict(color='green', dash='dot')))
 
-# --- Gráficos ---
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3],
-                    subplot_titles=('Análisis de Precio y Predicción', 'Oscilador RSI'))
+# 3. XGBoost
+fig.add_trace(go.Scatter(x=dates_future, y=future_xgb_prices, name="Modelo XGBoost (Técnico)", line=dict(color='orange', width=3)))
 
-# Gráfico 1
-fig.add_trace(go.Scatter(x=df['Date'], y=df['Close'], name="Precio Real (Cierre)", line=dict(color='cyan')), row=1, col=1)
-fig.add_trace(go.Scatter(x=df['Date'], y=df['SMA_200'], name="Tendencia (SMA 200)", line=dict(color='red', width=2)), row=1, col=1)
-fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name="Predicción IA", line=dict(color='#00ff00', dash='dot')), row=1, col=1)
-fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], showlegend=False, line=dict(width=0), hoverinfo='skip'), row=1, col=1)
-fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], fill='tonexty', fillcolor='rgba(0, 255, 0, 0.1)', line=dict(width=0), name="Rango Probable"), row=1, col=1)
-
-# Gráfico 2
-fig.add_trace(go.Scatter(x=df['Date'], y=df['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
-fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-
-fig.update_layout(template='plotly_dark', height=700)
+fig.update_layout(title="Comparativa de Modelos: Tendencia vs Técnico", template="plotly_dark", height=600)
 st.plotly_chart(fig, use_container_width=True)
 
-# --- Calculadora ---
-st.subheader("🔮 Calculadora de Precio Futuro")
-c1, c2 = st.columns([1, 2])
-with c1:
-    target = st.date_input("Consultar fecha:", min_value=df['Date'].iloc[-1].date()+timedelta(days=1), max_value=forecast['ds'].iloc[-1].date())
-with c2:
-    row = forecast[forecast['ds'] == pd.to_datetime(target)]
-    if not row.empty:
-        st.success(f"Estimación para {target.strftime('%d-%m-%Y')}: **${row['yhat'].values[0]:,.2f}** (Rango: ${row['yhat_lower'].values[0]:,.0f} - ${row['yhat_upper'].values[0]:,.0f})")
+# Explicación
+st.markdown("### 🤖 Análisis de Modelos")
+st.info("""
+**¿Por qué dos líneas de predicción?**
+* **Línea Verde (Prophet):** Es conservadora. Mira el calendario y la historia general.
+* **Línea Naranja (XGBoost):** Es agresiva. Mira el RSI, la volatilidad reciente y las medias móviles. Según tu investigación, este modelo suele tener mejor precisión a corto plazo (10-20% superior).
+""")
 
-# --- SECCIÓN EDUCATIVA (NUEVA) ---
-st.markdown("---")
-st.header("📚 Glosario Técnico y Metodología")
-
-with st.expander("1. Explicación de las Líneas del Gráfico (Leyenda)"):
-    st.markdown("""
-    * **🔵 Precio Real (Línea Cian):** Es el valor de cierre diario de Bitcoin verificado en el mercado.
-    * **🔴 Tendencia / SMA 200 (Línea Roja):** Es el *Promedio Móvil Simple* de los últimos 200 días. 
-        * *Interpretación:* Funciona como un "piso" o "techo" psicológico. Si el precio está por encima, se considera una tendencia general alcista (Bullish). Si cae por debajo, entramos en territorio bajista (Bearish).
-    * **🟢 Predicción IA (Punteada Verde):** Es el precio matemático más probable calculado por el algoritmo.
-    * **🟢 Rango Probable (Sombra Verde):** Ningún modelo conoce el futuro exacto. Esta sombra representa el intervalo de confianza del 80%. El precio real debería caer dentro de esta sombra la mayoría de las veces.
-    """)
-
-with st.expander("2. ¿Qué es el RSI? (Índice de Fuerza Relativa)"):
-    st.markdown("""
-    El **RSI** es un indicador tipo "termómetro" que va del 0 al 100.
-    * **🔥 Sobrecompra (> 70):** Línea roja punteada. Significa que el precio ha subido muy rápido y muy fuerte. Estadísticamente, aumenta la probabilidad de que la gente empiece a vender y el precio baje (corrección).
-    * **🧊 Sobreventa (< 30):** Línea verde punteada. Significa que el precio ha caído exageradamente. Aumenta la probabilidad de que los inversores vean una "oferta" y empiecen a comprar (rebote).
-    """)
-
-with st.expander("3. ¿Qué modelo predictor utiliza este panel?"):
-    st.markdown("""
-    Este panel utiliza **Facebook Prophet**, un algoritmo de series temporales de código abierto desarrollado por el equipo de Ciencia de Datos de Meta.
-    
-    **¿Por qué usamos Prophet para Bitcoin?**
-    A diferencia de modelos financieros tradicionales, Prophet está diseñado para detectar:
-    1.  **Tendencias no lineales:** Bitcoin no sube en línea recta; tiene curvas de adopción.
-    2.  **Estacionalidad:** Detecta patrones que se repiten (ej: comportamiento los fines de semana vs. días hábiles, o ciclos anuales).
-    3.  **Resistencia a ruido:** Ignora picos aislados (outliers) que podrían confundir a otros modelos más simples.
-    """)
+# Tabla comparativa
+st.subheader("📋 Proyección a 7 Días")
+proyeccion = pd.DataFrame({
+    'Fecha': pd.to_datetime(dates_future[:7]).strftime('%Y-%m-%d'),
+    'Prophet (Estable)': [f"${x:,.0f}" for x in forecast_prophet['yhat'].tail(30).values[:7]],
+    'XGBoost (Reactivo)': [f"${x:,.0f}" for x in future_xgb_prices[:7]]
+})
+st.table(proyeccion)
