@@ -6,3 +6,4 @@ prophet
 plotly
 xgboost
 requests
+scikit-learn
