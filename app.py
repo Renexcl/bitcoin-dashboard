@@ -7,14 +7,11 @@ from plotly import graph_objs as go
 from plotly.subplots import make_subplots
 from datetime import date, datetime, timedelta
 import pytz
-
 # --- Configuración de la Página ---
 st.set_page_config(layout="wide", page_title="Monitor Bitcoin IA By René Navarro Ourcilleón")
-
 # --- Barra Lateral (Configuración y Fecha) ---
 st.sidebar.title("⚙️ Panel de Control")
 st.sidebar.markdown("---")
-
 # Hora en Chile
 now_utc = datetime.now(pytz.utc)
 tz_chile = pytz.timezone('America/Santiago')
