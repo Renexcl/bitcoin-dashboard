@@ -25,7 +25,7 @@ st.sidebar.markdown("---")
 st.sidebar.write("Datos de Yahoo Finance en tiempo real.")
 
 # --- Título ---
-st.title('₿ Monitor Estratégico de Bitcoin')
+st.title('₿ Monitor Estratégico de Bitcoin By René Navarro Ourcilleón')
 st.markdown(f"> *Análisis técnico automatizado e Inteligencia Artificial aplicada.*")
 
 # --- Cargar Datos ---
