@@ -9,8 +9,7 @@ from datetime import date, datetime, timedelta
 import pytz
 
 # --- Configuración de la Página ---
-st.set_page_config(layout="wide", page_title="Monitor Bitcoin IA
-By René Navarro Ourcilleón")
+st.set_page_config(layout="wide", page_title="Monitor Bitcoin IA By René Navarro Ourcilleón")
 
 # --- Barra Lateral (Configuración y Fecha) ---
 st.sidebar.title("⚙️ Panel de Control")
